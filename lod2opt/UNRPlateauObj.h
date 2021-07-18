@@ -65,6 +65,8 @@ public:
 		m_y = 0;
 	}
 
+	std::string	m_material_name;
+
 	size_t		m_pos;			// obj line position
 	fs::path	m_file_path;	// image file path
 
@@ -80,28 +82,41 @@ public:
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 
+
+
+
+
+
+
 class UNRPlateauObj
 {
 public:
-	UNRPlateauObj() { m_vt_offset = 0; }
+	UNRPlateauObj() {
+		m_vt_offset = 0;
+		m_vt_count = 0;
+		m_append_vt_index = 0;
+	}
 	~UNRPlateauObj() { ; }
 
 
 public:
-static	bool	PackTextureRecursive(fs::path& obj_folder_path, fs::path& result_folder_path);
-	bool	PackTextureSingleObj(fs::path& obj_file_path, fs::path& result_folder_path);
 
+	static	int	PackTextureRecursive(const fs::path& obj_folder_path, const fs::path& result_folder_path);
+	int		PackTextureSingleObj(const fs::path& obj_file_path,const  fs::path& result_folder_path);
+
+
+	bool	IsWavefrontObjFile(const fs::path& target_file);
 private:
 
 
-	bool	LoadObj(fs::path& obj_file_path);
+	bool	LoadObj(const fs::path& obj_file_path);
 	bool	RecalcLayout();
-	bool	SaveObj(fs::path& obj_folder_path);
+	bool	SaveObj(const fs::path& obj_folder_path);
 
 	void	CreateNewTextureImage();
 	void	ReaclcUV(UNRMaterialInfoPtr& info);
 
-
+	void	PrintUVFace(std::string& face_line, const char* insert_command = 0);
 private:
 	// file path
 	fs::path	m_obj_path;
@@ -111,8 +126,8 @@ private:
 	std::vector<std::string>	m_obj_line;
 	std::string					m_coordinate_comment;
 
-	// 'vt' top offset
-	size_t	m_vt_offset;
+	size_t	m_vt_offset;	// 'vt' top offset
+	size_t	m_f_offset;		// 'f' top offset
 
 	// material information
 	MaterialInfo		m_obj_material;
@@ -125,4 +140,21 @@ private:
 	// texture image
 	cv::Mat	m_new_texture;
 
+
+private:
+	void	SetConvertedCheck(std::string& material, size_t pos);
+
+	size_t	CheckConverted(std::string& material, size_t pos);
+	void	ReplaceFcaeVt(size_t f_pos, std::map <size_t, size_t>& replace_vt);
+
+	void	ShareNewVt();
+
+
+	size_t		m_vt_count;
+	size_t		m_append_vt_index;
+
+	std::vector <std::string>		m_converted_vt_line;
+
+	std::map<size_t, std::string>	m_check_mark_material;			// <original vt index><material name>
+	std::map<size_t, size_t>		m_replace_face_vt_in_material;	// <vt index><vt index>
 };

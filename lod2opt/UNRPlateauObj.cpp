@@ -30,12 +30,14 @@ SOFTWARE.
 #include "opencv2/imgcodecs.hpp"
 #include <fstream>
 #include <sstream>
+#include <iostream>
+#include <algorithm>
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 //
 
-bool UNRPlateauObj::PackTextureRecursive(fs::path & obj_folder_path, fs::path & result_folder_path)
+int UNRPlateauObj::PackTextureRecursive(const fs::path & obj_folder_path,const fs::path & result_folder_path)
 {
 	fs::path result_folder__base_path = result_folder_path;
 	fs::path target_folder__base_path = obj_folder_path;
@@ -43,7 +45,9 @@ bool UNRPlateauObj::PackTextureRecursive(fs::path & obj_folder_path, fs::path & 
 	if (!fs::exists(obj_folder_path))
 	{
 		// not exists input folder
-		return false;
+		std::cerr << "Error : target folder not found : " << obj_folder_path.string() << std::endl;
+
+		return -10;
 	}
 
 	for (const auto & dir_entry : fs::directory_iterator(target_folder__base_path))
@@ -51,7 +55,11 @@ bool UNRPlateauObj::PackTextureRecursive(fs::path & obj_folder_path, fs::path & 
 
 		fs::path file_path = dir_entry.path();
 
-		if (file_path.extension().string().compare(".obj") == 0)
+		std::string externsion = file_path.extension().string();
+		transform(externsion.begin(), externsion.end(), externsion.begin(),
+								[](unsigned char c) { return toupper(c); });
+
+		if (externsion.compare(".OBJ") == 0)
 		{
 			if (!fs::exists(result_folder_path))
 			{
@@ -71,35 +79,70 @@ bool UNRPlateauObj::PackTextureRecursive(fs::path & obj_folder_path, fs::path & 
 		}
 
 	}
-	return true;
+	return 0;
 }
 
 
 //-----------------------------------------------------------------------------
-bool UNRPlateauObj::PackTextureSingleObj(fs::path & obj_file_path, fs::path & result_folder_path)
+int UNRPlateauObj::PackTextureSingleObj(const fs::path & obj_file_path,const  fs::path & result_folder_path)
 {
+	std::cout << "Start : " << obj_file_path.string() << std::endl;
+
 	LoadObj(obj_file_path);
 	RecalcLayout();
 	SaveObj(result_folder_path);
 
-	return false;
+	std::cout << "End "  << std::endl;
+
+
+	return 0;
 }
+
+//-----------------------------------------------------------------------------
+bool UNRPlateauObj::IsWavefrontObjFile(const fs::path& target_file)
+{
+	if (!fs::exists(target_file))
+	{
+		std::cerr << "Error : target file is not found : " << target_file.string() << std::endl;
+		return false;
+	}
+
+	std::string externsion =  target_file.extension().string();
+	std::transform(externsion.begin(), externsion.end(), externsion.begin(),
+									[](unsigned char c) { return toupper(c); });
+
+	if (externsion.compare(".OBJ") != 0)
+	{
+		std::cerr << "Error : target file is not .obj :" << target_file.string() << std::endl;
+		return false;
+	}
+
+	return true;
+}
+
 
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 // read wavefront obj
 //
 
-bool UNRPlateauObj::LoadObj(fs::path& obj_file_path)
+bool UNRPlateauObj::LoadObj(const fs::path& obj_file_path)
 {
+	//--
+	std::cout << "load obj file" << std::endl;
+
 	//-------------OBJ -----------
 	//
 	m_vt_offset = 0;
+	m_f_offset = 0;
+	m_append_vt_index = 0;
+	m_vt_count = 0;
 	std::ifstream ifs;
 
 	ifs.open(obj_file_path, std::ios_base::in);
 	if (!ifs)
 	{
+		std::cerr << "Error : cannot open obj " << obj_file_path.c_str() << std::endl;
 		return false;
 	}
 
@@ -130,9 +173,17 @@ bool UNRPlateauObj::LoadObj(fs::path& obj_file_path)
 		// check 'vt'
 		if (obj_line[0] == 'v' && obj_line[1] == 't')
 		{
+			m_vt_count++;
+			m_converted_vt_line.emplace_back(obj_line);
 			if (m_vt_offset == 0)
 			{
 				m_vt_offset = line_count;
+			}
+		} else if (obj_line[0] == 'f' && obj_line[1] == ' ')
+		{
+			if (m_f_offset == 0)
+			{
+				m_f_offset = line_count;
 			}
 		} else if (obj_line[0] == 'u' || obj_line[0] == 'm')
 		{
@@ -146,6 +197,7 @@ bool UNRPlateauObj::LoadObj(fs::path& obj_file_path)
 				// get material name
 				std::getline(iss, token, ' ');		
 				m_obj_material[token] = m_info.emplace_back(std::make_shared<UNRMaterialInfo>(line_count));
+				m_obj_material[token]->m_material_name = token;
 			}
 			else if (token.compare("mtllib") == 0)
 			{
@@ -160,6 +212,10 @@ bool UNRPlateauObj::LoadObj(fs::path& obj_file_path)
 	{
 		return false;
 	}
+	std::cout << " -- number of material " << m_obj_material.size() << std::endl;
+
+	m_append_vt_index = m_vt_count;
+
 
 	//-------------MTL -----------
 	// load mtl file
@@ -226,7 +282,12 @@ bool UNRPlateauObj::LoadObj(fs::path& obj_file_path)
 
 bool UNRPlateauObj::RecalcLayout()
 {
+	std::cout << " -- calc image layout " << std::endl;
+
 	// get image information
+
+	int max_width = 0;
+	int max_height = 0;
 	int area = 0;
 	for (auto i = m_obj_material.begin(); i != m_obj_material.end(); ++i)
 	{
@@ -247,6 +308,8 @@ bool UNRPlateauObj::RecalcLayout()
 
 		area += (row*col);
 
+		if (max_width < col) { max_width = col; }
+		if (max_height < row) { max_height = row; }
 	}
 
 	// descending sort by rows 
@@ -256,8 +319,11 @@ bool UNRPlateauObj::RecalcLayout()
 	});
 
 	//
-	int size = (int)sqrt(area) * 1.1;
-	
+	int size = (int)(sqrt(area) * 1.1);
+
+	if (size < max_width) { size = max_width; }
+	if (size < max_height) { size = max_height; }
+
 	int	next_x = -1;
 	int	cur_y = 0;
 	int	next_y = 0;
@@ -290,10 +356,14 @@ bool UNRPlateauObj::RecalcLayout()
 		}
 	}
 
-	m_width = size;
-	m_height = cur_y + next_y;
+	m_width = size + 1;
+	m_height = cur_y + next_y + 1;
+
+	std::cout << " -- image size  " << m_width << " x " << m_height << std::endl;
 
 	// remap UV coordinate
+	std::cout << " -- recalc uv coordinate " << std::endl;
+
 	for (idx = 0; idx < m_info.size(); idx++)
 	{
 		ReaclcUV(m_info[idx]);
@@ -305,145 +375,32 @@ bool UNRPlateauObj::RecalcLayout()
 //-----------------------------------------------------------------------------
 //-----------------------------------------------------------------------------
 
-void UNRPlateauObj::ReaclcUV(UNRMaterialInfoPtr& info)
+bool UNRPlateauObj::SaveObj(const fs::path& obj_folder_path)
 {
-	double wx = (double)m_width;
-	double wy = (double)m_height;
+	std::cout << " -- save new obj " << std::endl;
 
-	double w_orgine_x = (double)info->m_x;
-	double w_orgine_y = (double)info->m_y;
-
-	double w_width = (double)info->m_image.cols;
-	double w_height = (double)info->m_image.rows;
-
-
-	typedef std::map<size_t, size_t>	CheckMark;
-	CheckMark uv_converted;
-
-	size_t start = info->m_pos+1;
-
-	size_t idx;
-	for (idx = start; m_obj_line[idx][0] != 'u'; idx++)
+	// check shared vertex
+	if (m_append_vt_index > m_vt_count)
 	{
-		std::istringstream iss(m_obj_line[idx]);
-		std::string token;
-
-		std::getline(iss, token, ' ');	// skip 'f'
-
-		int j;
-		for (j = 0; !iss.eof(); j++)
-		{
-			std::getline(iss, token, ' ');	//
-
-			std::istringstream coord(token);
-			std::string vertex;
-
-			std::getline(coord, vertex, '/');	// skip geomrtry vertex
-			std::getline(coord, vertex, '/');	// uv
-
-			if (vertex.empty())
-			{
-				// error
-				continue;
-			}
-			size_t vpos = atoi(vertex.c_str());
-			if (vpos == 1)
-			{
-				int i = 0;
-			}
-			vpos += m_vt_offset - 1;
-
-
-			if (uv_converted.find(vpos) != uv_converted.end()) {
-				continue;
-			}
-
-
-
-			std::istringstream vt(m_obj_line[vpos]);
-			std::string uv_coord;
-
-			std::getline(vt, uv_coord, ' ');	// skip 'vt'
-			if (uv_coord == "v")
-			{
-				continue;
-			}
-
-			std::getline(vt, uv_coord, ' ');	// u
-			double u = atof(uv_coord.c_str());
-
-			double image_x = w_width * u + w_orgine_x;
-			double new_u = image_x / wx;
-
-
-			std::getline(vt, uv_coord, ' ');	// v
-			double v = atof(uv_coord.c_str());
-
-			double image_y = (w_height - w_height * v ) + w_orgine_y;
-			double new_v = (wy - image_y) / wy;
-
-			char uv_buff[100];
-			sprintf_s(uv_buff, 100, "vt %.6lf %.6lf", new_u, new_v);
-
-			m_obj_line[vpos] = uv_buff;
-
-			uv_converted[vpos] = 1;
-
-
-		}
-		if (idx + 1 == m_obj_line.size()) { break; }
-
+		// share same uv coordinate
+		ShareNewVt();
 	}
 
-	return;
-}
-
-//-----------------------------------------------------------------------------
-//-----------------------------------------------------------------------------
-
-void UNRPlateauObj::CreateNewTextureImage()
-{
-	m_new_texture = cv::Mat(m_height, m_width, CV_8UC3);
-
-	size_t idx;
-	for (idx = 0; idx < m_info.size(); idx++)
-	{
-
-		cv::Mat roi_dest(m_new_texture, cv::Rect(m_info[idx]->m_x, m_info[idx]->m_y,
-			m_info[idx]->m_image.cols, m_info[idx]->m_image.rows));
-		m_info[idx]->m_image.copyTo(roi_dest);
-
-	}
-
-	/***
-	int new_size = 1024;
-	cv::Mat resizeTexture(new_size, new_size, CV_8UC3);
-	cv::resize(m_new_texture, resizeTexture, resizeTexture.size());
-
-	cv::imshow("new_texture", resizeTexture);
-	cv::waitKey();
-	***/
-
-
-	return;
-}
-
-//-----------------------------------------------------------------------------
-
-bool UNRPlateauObj::SaveObj(fs::path& obj_folder_path)
-{
 	// check result folder
 	if (!fs::exists(obj_folder_path))
 	{
+		std::cout << " create new folder " << obj_folder_path << std::endl;
 		fs::create_directory(obj_folder_path);
 	}
 
 	CreateNewTextureImage();
 
 	fs::path new_obj_path = obj_folder_path;
-		
-	fs::path obj_file_name =  m_obj_path.filename();
+
+	fs::path obj_file_name = m_obj_path.filename();
 	new_obj_path /= obj_file_name;
+
+	std::cout << " file path " << new_obj_path << std::endl;
 
 	fs::path mtl_name = obj_file_name.stem();
 	std::wstring wmtl_name = mtl_name.c_str();
@@ -462,6 +419,7 @@ bool UNRPlateauObj::SaveObj(fs::path& obj_folder_path)
 	of_obj << "# texture packed obj" << std::endl;
 	of_obj << "# " << std::endl;
 
+	bool	write_vt = false;
 	// write obj
 	bool out_usemtl = false;
 	size_t i;
@@ -489,13 +447,27 @@ bool UNRPlateauObj::SaveObj(fs::path& obj_folder_path)
 			}
 
 		}
+		else if (m_obj_line[i][0] == 'v' && m_obj_line[i][1] == 't')
+		{
+			if (!write_vt)
+			{
+				write_vt = true;
+
+				size_t j;
+				for (j = 0; j < m_converted_vt_line.size(); j++)
+				{
+					of_obj << m_converted_vt_line[j] << std::endl;
+				}
+			}
+			continue;
+		}
 		of_obj << m_obj_line[i] << std::endl;
 	}
 
 	// texture image file
 	fs::path texture_abs_path = obj_folder_path;
 	texture_abs_path /= obj_file_name.replace_extension(".jpg");
-	
+
 	std::wstring w_texture_path = texture_abs_path.c_str();
 	std::string mb_texture_path(w_texture_path.begin(), w_texture_path.end());
 
@@ -507,11 +479,14 @@ bool UNRPlateauObj::SaveObj(fs::path& obj_folder_path)
 
 	// image size 512 --> 16K(max)
 	int new_size = 512;
-	if (max_len > 16384)    { new_size = 16384; }
+	if (max_len > 16384) { new_size = 16384; }
 	else if (max_len > 8192) { new_size = 8192; }
-	else if (max_len > 4096) { new_size = 4096;	}
+	else if (max_len > 4096) { new_size = 4096; }
 	else if (max_len > 2048) { new_size = 2048; }
 	else if (max_len > 1024) { new_size = 1024; }
+
+	std::cout << " -- new texture iimage size " << new_size << std::endl;
+
 
 
 	cv::Mat resizeTexture(new_size, new_size, CV_8UC3);
@@ -523,7 +498,7 @@ bool UNRPlateauObj::SaveObj(fs::path& obj_folder_path)
 
 	cv::imwrite(mb_texture_path, resizeTexture, paramas);
 
-	std::wstring w_texture_name= obj_file_name.replace_extension(".jpg");
+	std::wstring w_texture_name = obj_file_name.replace_extension(".jpg");
 	std::string mb_texture_file_name(w_texture_name.begin(), w_texture_name.end());
 
 	// mtl
@@ -543,3 +518,415 @@ bool UNRPlateauObj::SaveObj(fs::path& obj_folder_path)
 	return true;
 
 }
+
+
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+//
+void UNRPlateauObj::SetConvertedCheck(std::string& material, size_t pos)
+{
+	auto mark = m_check_mark_material.find(pos);
+	if (mark == m_check_mark_material.end()) {
+		m_check_mark_material[pos] = material;
+		return;
+	}
+
+	mark->second = material;
+
+	return;
+}
+
+//-----------------------------------------------------------------------------
+//
+size_t UNRPlateauObj::CheckConverted(std::string& material, size_t pos)
+{
+	size_t offseted_uv_pos = pos + m_vt_offset - 1;
+	auto mark = m_check_mark_material.find(pos);
+	if (mark == m_check_mark_material.end())
+	{
+		m_check_mark_material[pos] = material;
+
+		return pos;
+	}
+
+	if (mark->second.compare(material) == 0 )
+	{
+		// already converted
+		return 0;
+	}
+
+	// another material using this vt index
+	m_append_vt_index++;
+	m_check_mark_material[pos] = material;
+
+	return m_append_vt_index;
+}
+
+
+//-----------------------------------------------------------------------------
+
+void UNRPlateauObj::ReplaceFcaeVt(size_t f_pos, std::map <size_t, size_t>& replace_vt)
+{
+	std::string new_face_line("f");
+
+	std::istringstream iss(m_obj_line[f_pos]);
+	std::string token;
+
+	std::getline(iss, token, ' ');	// skip 'f'
+
+	bool	repacek_flag = false;
+	int j;
+	for (j = 0; !iss.eof(); j++)
+	{
+		new_face_line += " ";
+		std::getline(iss, token, ' ');	//
+
+		std::istringstream coord(token);
+		if (iss.eof()) { break; }
+		std::string vertex;
+
+		std::getline(coord, vertex, '/');	// real space
+		new_face_line += vertex;
+		new_face_line += "/";
+
+		std::getline(coord, vertex, '/');	// uv space
+		int uv_pos = std::stoi(vertex);
+
+		auto check_replace = replace_vt.find(uv_pos);
+		if (check_replace == replace_vt.end())
+		{
+			// no reaplce
+			new_face_line += vertex;
+		}
+		else {
+			// replace new vt
+			new_face_line += std::to_string(check_replace->second);
+			repacek_flag = true;
+		}
+	}
+
+	if (repacek_flag)
+	{
+		m_obj_line[f_pos] = new_face_line;
+	}
+
+	return;
+}
+
+//-----------------------------------------------------------------------------
+//
+//
+
+void UNRPlateauObj::ReaclcUV(UNRMaterialInfoPtr& info)
+{
+	m_replace_face_vt_in_material.clear();
+
+	bool swDebug = false;
+
+	double wx = (double)m_width;
+	double wy = (double)m_height;
+
+	double w_orgine_x = (double)info->m_x;
+	double w_orgine_y = (double)info->m_y;
+
+	double w_width = (double)info->m_image.cols;
+	double w_height = (double)info->m_image.rows;
+
+	if (false)
+	{
+		// DEBUG
+		swDebug = true;
+		std::cout << " material debug " << info->m_material_name << std::endl;
+		std::cout << " m_width " << m_width << " m_height" << m_height << std::endl;
+		std::cout << " orign x " << info->m_x << " y" << info->m_x << std::endl;
+		std::cout << " image width " << info->m_image.cols << " height " << info->m_image.rows << std::endl;
+
+	}
+
+	size_t counter = 0;
+
+	size_t start = info->m_pos+1;
+	size_t idx;
+	for (idx = start; m_obj_line[idx][0] != 'u'; idx++)
+	{
+		counter++;
+		if (swDebug)
+		{
+			if (counter == 23)
+			{
+				int i = 0;
+			}
+		}
+		std::istringstream iss(m_obj_line[idx]);
+		std::string token;
+
+		std::getline(iss, token, ' ');	// skip 'f'
+
+		int j;
+		for (j = 0; !iss.eof(); j++)
+		{
+			std::getline(iss, token, ' ');	//
+
+			std::istringstream coord(token);
+			if (iss.eof()) { break; }
+			std::string vertex;
+
+			std::getline(coord, vertex, '/');	// skip geomrtry vertex
+			std::getline(coord, vertex, '/');	// uv
+
+			if (vertex.empty())
+			{
+				// error
+				continue;
+			}
+			size_t uv_pos = std::stoi(vertex);
+
+
+			//
+			size_t offseted_uv_pos = uv_pos + m_vt_offset - 1;
+			std::string convert_string = m_obj_line[offseted_uv_pos];	// source vt
+
+			size_t new_uv_pos = CheckConverted(info->m_material_name, uv_pos);
+			if (new_uv_pos == 0)
+			{
+				// already converted, skip
+				continue;
+			} else if (uv_pos != new_uv_pos)
+			{
+				// replace face line
+				m_replace_face_vt_in_material[uv_pos] = new_uv_pos;
+
+			}
+
+			std::istringstream vt(convert_string);
+			std::string uv_coord;
+
+			std::getline(vt, uv_coord, ' ');	// skip 'vt'
+
+			std::getline(vt, uv_coord, ' ');	// u
+			double u = atof(uv_coord.c_str());
+
+			double image_x = w_width * u + w_orgine_x;
+			double new_u = image_x / wx;
+
+
+			if ( new_u < 0.0 ) {
+				new_u = 0.0;
+			} if (new_u > 1.0)
+			{
+				new_u = 1.0;
+			}
+
+			std::getline(vt, uv_coord, ' ');	// v
+			double v = atof(uv_coord.c_str());
+
+			double image_y = (w_height - w_height * v ) + w_orgine_y;
+			double new_v = (wy - image_y) / wy;
+
+
+			if (new_v < 0.0) {
+				new_v = 0.0;
+			} if (new_v > 1.0)
+			{
+				new_v = 1.0;
+			}
+
+
+			char uv_buff[100];
+			sprintf_s(uv_buff, 100, "vt %.6lf %.6lf", new_u, new_v);
+
+			if (new_uv_pos < m_vt_count)
+			{
+				m_converted_vt_line[uv_pos-1] = uv_buff;		// Replace vt line
+			}
+			else {
+				m_converted_vt_line.emplace_back(uv_buff);		// Append vt line
+			}
+
+			SetConvertedCheck(info->m_material_name, uv_pos);
+
+		}
+
+		if (!m_replace_face_vt_in_material.empty())
+		{
+			ReplaceFcaeVt(idx, m_replace_face_vt_in_material);
+		}
+
+		if (swDebug)
+		{
+			PrintUVFace(m_obj_line[idx], "polyline");
+		}
+		if (idx + 1 == m_obj_line.size()) { break; }
+
+	}
+
+	return;
+}
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+// print UV Face : for debug
+//
+void UNRPlateauObj::PrintUVFace(std::string& face_line,const char* insert_command)
+{
+	std::istringstream iss(face_line);
+	std::string token;
+
+	std::getline(iss, token, ' ');	// skip 'f'
+
+	if ( insert_command )
+	{
+		std::cout << insert_command;
+	}
+
+	double first_u = 0.0;
+	double first_v = 0.0;
+	int i;
+	for (i = 0; !iss.eof(); i++)
+	{
+		std::cout << " ";
+
+		std::getline(iss, token, ' ');	//
+
+		std::istringstream coord(token);
+		if (iss.eof()) { break; }
+		std::string vertex;
+
+		std::getline(coord, vertex, '/');	// skip geomrtry vertex
+		std::getline(coord, vertex, '/');	// uv
+
+		if (vertex.empty())
+		{
+			// error
+			std::cerr << "warning: not found vertx "  << std::endl;
+			continue;
+		}
+		size_t uv_pos = atoi(vertex.c_str());
+		std::istringstream vt(m_converted_vt_line[uv_pos-1]);
+		std::string uv_coord;
+
+		std::getline(vt, uv_coord, ' ');	// skip 'vt'
+
+		std::getline(vt, uv_coord, ' ');	// u
+		double u = atof(uv_coord.c_str());
+
+
+		std::getline(vt, uv_coord, ' ');	// v
+		double v = atof(uv_coord.c_str());
+
+		if (i == 0)
+		{
+			first_u = u;
+			first_v = v;
+		}
+
+		std::cout << u << "," << v;
+
+	}
+	// close face
+	std::cout << first_u << "," << first_v << std::endl;
+
+
+
+	return;
+}
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+
+void UNRPlateauObj::CreateNewTextureImage()
+{
+	std::cout << " -- create packed texture image file " << std::endl;
+
+	m_new_texture = cv::Mat(m_height, m_width, CV_8UC3);
+
+	size_t idx;
+	for (idx = 0; idx < m_info.size(); idx++)
+	{
+
+		cv::Mat roi_dest(m_new_texture, cv::Rect(m_info[idx]->m_x, m_info[idx]->m_y,
+			m_info[idx]->m_image.cols, m_info[idx]->m_image.rows));
+		m_info[idx]->m_image.copyTo(roi_dest);
+
+	}
+
+	return;
+}
+
+
+//-----------------------------------------------------------------------------
+//-----------------------------------------------------------------------------
+void UNRPlateauObj::ShareNewVt()
+{
+	std::map<std::string, size_t>	shareed_vertx;				// <vt line> <new vt index>
+	std::vector<std::string>		shared_vt_line;
+
+	size_t new_vt_index = m_vt_count;
+
+	size_t i;
+	for (i = m_vt_count; i < m_append_vt_index; i++)
+	{
+		auto it = shareed_vertx.find(m_converted_vt_line[i]);
+		if (it == shareed_vertx.end())
+		{
+			shareed_vertx[m_converted_vt_line[i]] = new_vt_index; new_vt_index++;
+			shared_vt_line.emplace_back(m_converted_vt_line[i]);
+		}
+	}
+	// replace 'f' vt index
+	for (i = m_f_offset; i < m_obj_line.size(); i++)
+	{
+		bool replace_flag = false;
+		std::string new_f_line("f");
+		if (m_obj_line[i][0] == 'f' && m_obj_line[i][1] == ' ')
+		{
+
+			std::istringstream iss(m_obj_line[i]);
+			std::string token;
+
+			std::getline(iss, token, ' ');	// skip 'f'
+
+			int j;
+			for (j = 0; !iss.eof(); j++)
+			{
+				new_f_line += " ";
+				std::getline(iss, token, ' ');	//
+
+				std::istringstream coord(token);
+				if (iss.eof()) { break; }
+				std::string vertex;
+
+				std::getline(coord, vertex, '/');	// skip geomrtry vertex
+				new_f_line += vertex;
+				new_f_line += "/";
+
+				std::getline(coord, vertex, '/');	// uv
+
+				size_t uv_pos = std::stoi(vertex);
+
+				auto it = shareed_vertx.find(m_converted_vt_line[uv_pos]);
+				if (it != shareed_vertx.end())
+				{
+					// found shared vt,repalce index
+					replace_flag = true;
+
+					vertex = std::to_string(it->second);
+
+				}
+				new_f_line += vertex;
+			}
+
+		}
+		if (replace_flag)
+		{
+			m_obj_line[i] = new_f_line;
+		}
+	}
+
+	// truc m_converted_vt_line
+	m_converted_vt_line.resize(new_vt_index);
+
+	return;
+}
+
